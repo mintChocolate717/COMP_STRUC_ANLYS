@@ -418,10 +418,8 @@ def create_known_displacements_matrix(displacements: np.ndarray, num_disp_BCs: i
         # [NaN, prescribed value for DOF 1, prescribed value for DOF 2, ...]
     return known_displacements
 
-def assemble_element_by_element(bele: np.ndarray, elenodes: np.ndarray, gcon: np.ndarray, 
-                                displacements: np.ndarray, forces: np.ndarray, 
-                                E: np.ndarray, A: np.ndarray, L: np.ndarray, 
-                                dof_per_node: int, num_active_dofs: int, num_disp_BCs: int, num_nodes: int) -> Tuple[np.ndarray, np.ndarray]:
+def assemble_element_by_element(bele: np.ndarray, elenodes: np.ndarray, gcon: np.ndarray, displacements: np.ndarray, forces: np.ndarray, 
+                                E: np.ndarray, A: np.ndarray, L: np.ndarray, dof_per_node: int, num_active_dofs: int, num_disp_BCs: int, num_nodes: int) -> Tuple[np.ndarray, np.ndarray]:
     """
     Assemble the global stiffness matrix and adjust the force vector using an element-by-element approach.
 
@@ -431,10 +429,9 @@ def assemble_element_by_element(bele: np.ndarray, elenodes: np.ndarray, gcon: np
     from the stiffness matrix to the force vector.
 
     The assembly process involves:
-      1. Reducing the total number of degrees of freedom (DOFs) by subtracting the number of prescribed displacement BCs.
-      2. Creating a reduced force vector and global stiffness matrix for the free DOFs.
-      3. Constructing a matrix of known (prescribed) displacements from the displacement BC array.
-      4. For each element:
+      1. Creating a reduced force vector and global stiffness matrix for the free DOFs.
+      2. Constructing a matrix of known (prescribed) displacements from the displacement BC array.
+      3. For each element:
          a. Computing its local stiffness matrix using the transformation factors (bele), Young's modulus (E),
             cross-sectional area (A), and element length (L).
          b. Mapping the local stiffness contributions into the global stiffness matrix using the element connectivity
@@ -472,61 +469,132 @@ def assemble_element_by_element(bele: np.ndarray, elenodes: np.ndarray, gcon: np
     """
 
     # Create a reduced force vector for the free DOFs (preserving 1-based indexing; index 0 is a dummy).
-    reduced_forces = forces.copy()[:num_active_dofs+1]
+    reduced_forces = forces.copy()[0:num_active_dofs+1]
     # Initialize the reduced global stiffness matrix for free DOFs.
-    stiffness_size = num_active_dofs + 1  # extra "+1" for 1-based indexing
-    reduced_global_stiffness = np.zeros((stiffness_size, stiffness_size), dtype=float)
+    stiff_size = num_active_dofs + 1  # extra "+1" for 1-based indexing
+    reduced_global_stiff = np.zeros((stiff_size, stiff_size), dtype=float)
     # Build a matrix for known (prescribed) displacements from the displacement BCs.
-    known_Us = create_known_displacements_matrix(displacements, num_disp_BCs, num_nodes, dof_per_node)
+    known_displacements = create_known_displacements_matrix(displacements, num_disp_BCs, num_nodes, dof_per_node)
 
     # Loop over each element (starting at index 1 due to 1-based indexing).
     for element_i in range(1, len(elenodes)):
         # Initialize the local stiffness matrix for the current element.
-        # The size is (2*dof_per_node)x(2*dof_per_node) with an extra row and column for 1-based indexing.
+        # The size is (2*dof_per_node)x(2*dof_per_node) for 2 nodes per element with an extra row and column for 1-based indexing.
         local_stiffness = np.zeros((2 * dof_per_node + 1, 2 * dof_per_node + 1), dtype=float)
         
         # Compute the local stiffness matrix.
-        # Formula: kele[i, j] = (E*A/L) * (transformation factor from bele for DOF i) * (transformation factor from bele for DOF j)
-        for i in range(1, 2 * dof_per_node + 1):
-            for j in range(1, 2 * dof_per_node + 1):
-                local_stiffness[i, j] = E[element_i] * A[element_i] / L[element_i] * bele[element_i, i] * bele[element_i, j]
+        # Formula: kele[i, j] = (E*A/L) * (bele for DOF i) * (bele for DOF j)
+        # NOTE: we are creating the local K matrix, where it's comprised of all possible combinations of c1, c2, -c1, -c2.
+        local_stiffness[1:, 1:] = E[element_i] * A[element_i] / L[element_i] * np.outer(bele[element_i, 1:], bele[element_i, 1:])
         
-        # Assemble the local stiffness contributions into the global stiffness matrix.
-        # Loop over the two nodes of the element.
-        for node_i in [1, 2]:
-            # Loop over each degree of freedom for the current node.
-            for dof_i in range(1, dof_per_node + 1):
-                # Calculate the local row index in the element's stiffness matrix.
-                dof_i_local = (node_i - 1) * dof_per_node + dof_i
+        # Assemble the LOCAL stiffness contributions into the GLOBAL stiffness matrix.
+        # NOTE: K_ele's row/col architecture:
+                  # 1st half is for node1 and the 2nd half is for node2,
+                  # and each node has dof_per_node (2 or 3) degrees of freedom.
+        
+        # NOTE: We go Rows first
+        for node_i in [1, 2]: # Loop over the two NODES of the element.
+          for node_dof_i in range(1, dof_per_node + 1): # Loop over each LOCAL dof for the current node.
+                # get the LOCAL ROW index in the element's stiffness matrix.
+                # we are accessing each ROW of K_ele based on node# and local dof#
+                dof_i_local = (node_i - 1) * dof_per_node + node_dof_i # essentially the area of a rectangle
                 
-                # Map the local node and DOF to the global DOF using the global connectivity matrix.
-                dof_i_global = int(gcon[int(elenodes[element_i, node_i]), dof_i])
+                # get the node number local node (1 or 2) for current element
+                local_node_num_i = int(elenodes[element_i, node_i])
+                # Map the LOCAL node and DOF to the GLOBAL DOF using the global connectivity matrix.
+                dof_i_global = int(gcon[local_node_num_i, node_dof_i])
                 
-                # Assemble only if the global DOF is free.
+                # Assemble only if the global DOF is free / active equation.
+                # we don't care about equatiosn that are associated with prescribed displacements. 
                 if dof_i_global <= num_active_dofs:
-                    # Loop over the two nodes (columns) of the element.
-                    for node_j in [1, 2]:
-                        for dof_j in range(1, dof_per_node + 1):
+                    # NOTE: now we do the same thing for the COLUMNS, but note that removing columns requires MOVING known values to the RHS
+                    for node_j in [1, 2]: # Loop over the two nodes (columns) of the element.
+                        for node_dof_j in range(1, dof_per_node + 1):
                             # Calculate the local column index in the element's stiffness matrix.
-                            dof_j_local = (node_j - 1) * dof_per_node + dof_j
-                            
+                            dof_j_local = (node_j - 1) * dof_per_node + node_dof_j
+
+                            # get the node number local node (1 or 2) for current element
+                            local_node_num_j = int(elenodes[element_i, node_j])
                             # Map the local DOF to the corresponding global DOF.
-                            dof_j_global = int(gcon[int(elenodes[element_i, node_j]), dof_j])
+                            dof_j_global = int(gcon[local_node_num_j, node_dof_j])
                             
+                            # again, check if the column is for corresponding free row.
                             if dof_j_global <= num_active_dofs:
-                                # For free DOFs, add the local stiffness contribution to the global stiffness matrix.
-                                reduced_global_stiffness[dof_i_global, dof_j_global] += local_stiffness[dof_i_local, dof_j_local]
+                                # For FREE/ACTIVE DOFs, add the local stiffness contribution to the global stiffness matrix.
+                                reduced_global_stiff[dof_i_global, dof_j_global] += local_stiffness[dof_i_local, dof_j_local]
+                            # if NOT, move columns that are beyond active number of equations, to the RHS
                             else:
                                 # For prescribed DOFs, adjust the force vector by subtracting the contribution 
-                                # (K_up * u_prescribed) from the current row in the stiffness matrix.
-                                u = known_Us[int(elenodes[element_i, node_j]), dof_j]
+                                u = known_displacements[local_node_num_j, node_dof_j]
                                 reduced_forces[dof_i_global] -= local_stiffness[dof_i_local, dof_j_local] * u
-    
-    return reduced_global_stiffness, reduced_forces
+          
+    return reduced_global_stiff, reduced_forces
 
 
 def solve_reduced_nodal_displacements(reduced_stiffness: np.ndarray, RHS_reduced: np.ndarray):
-    return np.linalg.solve(reduced_stiffness[1:, 1:], RHS_reduced[1:]) # 1st rows/cols are dummy cols, get rid of them
+    """
+    Solves for the unknown nodal displacements in a reduced finite element system.
+
+    This function takes the reduced global stiffness matrix (after removing prescribed DOFs)
+    and the corresponding reduced force vector (RHS) to solve for the unknown nodal displacements.
+
+    Parameters:
+      reduced_stiffness : np.ndarray
+          The reduced global stiffness matrix after eliminating constrained DOFs.
+      RHS_reduced : np.ndarray
+          The reduced force vector after applying prescribed displacement boundary conditions.
+
+    Returns:
+      np.ndarray
+          A 1D array containing the computed unknown nodal displacements for free DOFs.
+    """
+    # Extract the actual stiffness matrix and RHS vector by removing the first row and column.
+    # These first entries are dummy values for 1-based indexing and do not affect the solution.
+    return np.linalg.solve(reduced_stiffness[1:, 1:], RHS_reduced[1:]) 
+
+def insert_solved_displacements(full_disp: np.ndarray, solved_disp: np.ndarray, gcon: np.ndarray, num_active_dofs: int) -> np.ndarray:
+    """
+    Inserts the computed displacements of free (active) DOFs into the full nodal displacement matrix.
+
+    This function updates the full nodal displacement matrix by filling in the solved displacement values 
+    for the active DOFs while preserving the prescribed (fixed) displacement values.
+
+    Parameters:
+      full_disp : np.ndarray
+          The full nodal displacement array where all DOFs (free and prescribed) are stored.
+      solved_disp : np.ndarray
+          The computed displacements of free DOFs obtained from solving the reduced system.
+      gcon : np.ndarray
+          The global connectivity matrix mapping local node DOFs to global DOF numbers.
+      num_active_dofs : int
+          The total number of active (free) DOFs in the system.
+      num_nodes : int
+          The total number of nodes in the structure.
+      dof_per_node : int
+          The number of degrees of freedom per node.
+
+    Returns:
+      np.ndarray
+          The updated full displacement array (matrix) with solved free DOFs filled in.
+
+    Notes:
+      - Only active DOFs (those that were not prescribed) are updated with solved values.
+      - Prescribed DOFs (displacement boundary conditions) remain unchanged.
+    """
+    # Flatten the global connectivity matrix to get a 1D array of global DOF indices
+    flat_gcon = gcon.flatten()
+    # Create a boolean mask that identifies free (active) DOFs:
+    # because we only need to fill in solved displacements, we already have prescribed displacements in our matrix.
+    # A DOF is free if its global index is <= num_active_dofs.
+    free_dofs_mask = flat_gcon <= num_active_dofs
+    # Flatten the full displacement matrix so we can update it using 1D indexing
+    flat_full_disp = full_disp.flatten()
+    # For free DOFs, update the displacement values with the solved values.
+    flat_full_disp[free_dofs_mask] = solved_disp[flat_gcon[free_dofs_mask].astype(int)]
+
+    # Reshape the updated displacement array back to its original matrix form
+    return flat_full_disp.reshape(full_disp.shape)
+
 
 def write_nodal_displacements_file(nodes:np.ndarray, nodal_disp: np.ndarray, num_nodes:int, dof_per_node: int) -> pd.DataFrame:
     # pull out x and y coordinates of each node to form full data table
@@ -579,96 +647,133 @@ def write_bar_properties_file(strain:np.ndarray, bar_force:np.ndarray, L:np.ndar
     return df.round(6)
 
 def main():
+    """
+    Main function to execute the finite element analysis for a 3D truss system.
 
-    directory_path = "hw4_inputs/"
-    #if spatial_dimension == 3: directory_path = "test_cases_3d/"
+    This function:
+    - Reads input files containing node coordinates, element connectivity, applied forces, and displacement boundary conditions.
+    - Computes degrees of freedom (DOFs) per node and initializes the global DOF structure.
+    - Assembles the global stiffness matrix and force vector using an element-by-element approach.
+    - Solves for the reduced nodal displacements.
+    """
+
+    # Define the directory containing the input files
+    directory_path = "/Users/kis/Desktop/COE321K/hw4/test_cases_3d/"
     print(f"ACCESSING FOLDER: {directory_path}")
 
-    # Call the function to get node mx, num_nodes, and num_dims
-    nodes, num_nodes, num_dims = read_nodes_file(filepath=directory_path+'nodes')
-    # compute dof per node
-    dof_per_node = num_dims # for Truss only
-    # total number of DOFs in a structure
-    num_total_dofs = (len(nodes) - 1) * dof_per_node
+    # -------------------------------
+    # STEP 1: READ NODE INFORMATION
+    # -------------------------------
+    # Read the node file to obtain nodal coordinates, total number of nodes, and problem dimension (2D/3D)
+    nodes, num_nodes, num_dims = read_nodes_file(filepath=directory_path + 'nodes')
 
+    # Compute the degrees of freedom per node (for a truss, DOFs = spatial dimensions)
+    dof_per_node = num_dims  
+
+    # Compute the total number of DOFs in the structure (excluding padding)
+    num_total_dofs = (len(nodes) - 1) * dof_per_node  # Using 1-based indexing
+
+    # Construct the global connectivity matrix, mapping local DOFs to global indices
     global_connectivity = build_global_connectivity(nodes, dof_per_node)
 
-    elements, elenodes, num_elements = read_elements_file(filepath=directory_path+'elements')
+    # -------------------------------
+    # STEP 2: READ ELEMENT CONNECTIVITY
+    # -------------------------------
+    # Read the element file, which defines how nodes are connected to form elements
+    elements, elenodes, num_elements = read_elements_file(filepath=directory_path + 'elements')
 
-    lengths, cosines = compute_lengths_and_cosines(elements, nodes)
+    # Compute element lengths and directional cosines (used for transformation matrices)
+    Ls, cosines = compute_lengths_and_cosines(elements, nodes)
 
-    force_BCs, num_force_BCs = read_forces_file(filepath=directory_path+'forces')
-    
-    displacement_BCs, num_displacement_BCs = read_displacements_file(filepath=directory_path+'displacements')
-    # number of active equations, or free DOFs without prescribed values.
-    num_active_dofs = num_total_dofs - num_displacement_BCs
+    # -------------------------------
+    # STEP 3: READ FORCE AND DISPLACEMENT BOUNDARY CONDITIONS
+    # -------------------------------
+    # Read the applied force boundary conditions (external loads)
+    force_BCs, num_force_BCs = read_forces_file(filepath=directory_path + 'forces')
 
-    global_connectivity = reorder_global_connectivity(displacement_BCs, global_connectivity, num_total_dofs)
+    # Read the prescribed displacement boundary conditions (fixed DOFs)
+    disp_BCs, num_disp_BCs = read_displacements_file(filepath=directory_path + 'displacements')
 
+    # Compute the number of active DOFs (free DOFs without prescribed displacements)
+    num_active_dofs = num_total_dofs - num_disp_BCs
+
+    # Reorder the global connectivity matrix to ensure proper handling of prescribed displacements
+    global_connectivity = reorder_global_connectivity(disp_BCs, global_connectivity, num_total_dofs)
+
+    # Initialize the global force vector, incorporating external loads
     forces = init_forces(force_BCs, global_connectivity, num_total_dofs)
 
+    # -------------------------------
+    # STEP 4: ASSEMBLE GLOBAL STIFFNESS MATRIX
+    # -------------------------------
+    # Construct element transformation matrices (direction cosines for each bar element)
     bar_elements = build_bele(cosines, num_elements, dof_per_node)
 
-    Es = elements[:, -2]
-    As = elements[:, -1]
+    # Extract Young's modulus (E) and cross-sectional area (A) from element properties
+    Es = elements[:, -2]  # Young's modulus for each element
+    As = elements[:, -1]  # Cross-sectional area for each element
 
-    K_reduced, F_reduced = assemble_element_by_element(bar_elements, elenodes, global_connectivity, displacement_BCs, forces, 
-                                                       Es, As, lengths, dof_per_node, num_active_dofs, num_displacement_BCs, num_nodes)
-    
-    solution = solve_reduced_nodal_displacements(K_reduced, F_reduced)
+    # Assemble the global stiffness matrix and reduce it for active DOFs
+    K_red, F_red = assemble_element_by_element(
+        bar_elements, elenodes, global_connectivity, disp_BCs, forces, 
+        Es, As, Ls, dof_per_node, num_active_dofs, num_disp_BCs, num_nodes
+    )
 
+    # -------------------------------
+    # STEP 5: SOLVE FOR NODAL DISPLACEMENTS
+    # -------------------------------
+    # Solve for the UNKNOWN nodal displacements using the reduced system of equations.
+    # This function solves K_reduced * u_free/unknown = F_reduced for the free DOFs.
+    solved_U_red = solve_reduced_nodal_displacements(K_red, F_red)
 
-    # Create the known displacement matrix (or vector) for prescribed displacements.
-    nodal_displacements = np.zeros((num_nodes + 1, dof_per_node + 1))
-    for i in range(1, num_displacement_BCs + 1):
-        node = int(displacement_BCs[i, 0])  # Node number
-        dof  = int(displacement_BCs[i, 1])  # DOF number
-        value = displacement_BCs[i, 2]      # Prescribed displacement value
-        nodal_displacements[node, dof] = value
+    # Reconstruct the full nodal displacement matrix by incorporating known (prescribed) displacements.
+    # This ensures that both free and fixed displacements are included in the final displacement array.
+    nodal_disps = create_known_displacements_matrix(disp_BCs, num_disp_BCs, num_nodes, dof_per_node)
 
-    # pad a solution with nan value at the front for 1-based indexing.
-    padded_sol = np.pad(solution, ((1,0), (0,0)), 'constant', constant_values=np.nan).reshape((len(solution)+1,))
-    num_active_eqs = num_total_dofs - (len(displacement_BCs) - 1)
-    
-    for i in range(1, num_nodes+1):
-        for j in range(1, dof_per_node+1):
-            dof = int(global_connectivity[i, j])
-            if dof <= num_active_eqs: # TODO: possible error, might need to change to num_active_eqs.
-                nodal_displacements[i, j] = padded_sol[dof]
+    # Pad the solution with a NaN value at the front to maintain 1-based indexing.
+    # This aligns the array structure with the 1-based convention used in input data.
+    solved_U_red = np.pad(solved_U_red, ((1,0), (0,0)), 'constant', constant_values=np.nan).reshape((len(solved_U_red)+1,))
+
+    nodal_disps = insert_solved_displacements(nodal_disps, solved_U_red, global_connectivity, num_active_dofs)
 
     stretch = np.zeros(shape=(num_elements+1,))
     bar_forces = np.full_like(stretch, fill_value=np.nan)
     external_forces = np.zeros((num_nodes+1, dof_per_node+1))
 
     stretch[0] = np.nan
-    for iele in range(1, num_elements+1):
-        ulocal = np.zeros((2*dof_per_node+1,))
-        ulocal[0] = np.nan
-        for local_node in range(1, 3):
-            for local_dof in range(1, dof_per_node+1):
-                ulocal[dof_per_node * (local_node-1)+local_dof] = nodal_displacements[int(elenodes[iele, local_node]), local_dof]
-        for i in range(1, 2*dof_per_node+1):
-            stretch[iele] += bar_elements[iele, i] * ulocal[i]
+
+    for iele in range(1, num_elements+1): # Loop over each element
+        ulocal = np.zeros((2*dof_per_node+1,)) # Initialize local displacement vector
+        ulocal[0] = np.nan # Set the 0th index to NaN for 1-based indexing
+        for local_node in [1,2]: # Loop over the two nodes of the element
+            for local_dof in range(1, dof_per_node+1): # Loop over each local DOF for the current node
+                # Get the global node number for the current local node
+                ulocal[dof_per_node * (local_node - 1)+local_dof] = nodal_disps[int(elenodes[iele, local_node]), local_dof]
         
-        bar_forces[iele] = stretch[iele] * Es[iele] * As[iele] / lengths[iele]
+        for i in range(1, 2*dof_per_node+1): # Loop over each local DOF of the element
+            stretch[iele] += bar_elements[iele, i] * ulocal[i] # Compute the element stretch
         
-        for local_node in range(1, 3):
-            for local_dof in range(1, dof_per_node+1):
-                global_node = int(elenodes[iele, local_node])
+        bar_forces[iele] = stretch[iele] * Es[iele] * As[iele] / Ls[iele] # Compute the bar force
+        
+        for local_node in [1, 2]: # Loop over the two nodes of the element
+            for local_dof in range(1, dof_per_node+1): # Loop over each local DOF for the current node
+                global_node = int(elenodes[iele, local_node]) # Get the global node number
+                # Update the external forces array with the computed forces
                 external_forces[global_node, local_dof] += bar_forces[iele] * bar_elements[iele, dof_per_node * (local_node - 1) + local_dof]
 
-    # compute strain
-    strains = stretch / lengths
+    # Compute the strains in each element
+    strains = stretch / Ls
+    
     #### print out final data outputs:
     print("\n")
     print("-" * 40)
-    nodal_displacements_df = write_nodal_displacements_file(nodes, nodal_displacements, num_nodes, dof_per_node)
+    nodal_displacements_df = write_nodal_displacements_file(nodes, nodal_disps, num_nodes, dof_per_node)
     print("<<< NODAL DISPLACEMENTS DATA TABLE >>>")
     print(nodal_displacements_df)
     external_forces_df = write_external_forces_file(nodes, external_forces, num_nodes, dof_per_node)
     print("\n<<< EXTERNAL FORCES DATA TABLE >>>")
     print(external_forces_df)
-    element_properties_df = write_bar_properties_file(strains, bar_forces, lengths, num_elements)
+    element_properties_df = write_bar_properties_file(strains, bar_forces, Ls, num_elements)
     print("\n<<< ELEMENT STRAINS AND FORCES DATA TABLE >>>")
     print(element_properties_df)
 
