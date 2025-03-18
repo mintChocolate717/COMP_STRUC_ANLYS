@@ -772,7 +772,7 @@ def write_external_forces_file(nodes:np.ndarray, ext_forces: np.ndarray, num_nod
     # Construct the DataFrame
     df = pd.DataFrame(
         data=data,
-        columns=['x', 'y', 'z', 'f_x', 'f_y', 'f_w'] if dof_per_node == 3 else ['x', 'y','f_x', 'f_y'],
+        columns=['x', 'y', 'z', 'f_x', 'f_y', 'f_z'] if dof_per_node == 3 else ['x', 'y','f_x', 'f_y'],
         index=np.arange(1, num_nodes+1)
     )
     # Set the index name explicitly
