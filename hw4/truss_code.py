@@ -5,7 +5,6 @@ import numpy as np
 np.set_printoptions(linewidth=300)
 import pandas as pd
 from typing import Tuple
-from sys import argv
 
 def read_nodes_file(filepath: str) -> Tuple[np.ndarray, int, int]:
     """
@@ -530,7 +529,6 @@ def assemble_element_by_element(bele: np.ndarray, elenodes: np.ndarray, gcon: np
           
     return reduced_global_stiff, reduced_forces
 
-
 def solve_reduced_nodal_displacements(reduced_stiffness: np.ndarray, RHS_reduced: np.ndarray):
     """
     Solves for the unknown nodal displacements in a reduced finite element system.
@@ -595,6 +593,162 @@ def insert_solved_displacements(full_disp: np.ndarray, solved_disp: np.ndarray, 
     # Reshape the updated displacement array back to its original matrix form
     return flat_full_disp.reshape(full_disp.shape)
 
+def compute_element_stretches(nodal_disps: np.ndarray, elenodes: np.ndarray, bele: np.ndarray, num_elements: int, dof_per_node: int) -> np.ndarray:
+    """
+    Computes the stretch (elongation) for each element based on local nodal displacements and the element's transformation (BELE) matrix.
+
+    The stretch for an element is calculated as the row-wise dot product between the element's BELE and the corresponding local nodal displacements.
+
+    Parameters:
+      nodal_disps : np.ndarray
+          A 2D array containing the nodal displacements. It is assumed to use 1-based indexing, 
+          with the 0th row and 0th column acting as dummy placeholders.
+      elenodes : np.ndarray
+          A 2D array defining the connectivity of each element. Each row corresponds to an element 
+          and contains the node numbers that make up the element. This array is padded for 1-based indexing.
+      bele : np.ndarray
+          A 2D array representing the BELE (transformation) matrix for each element, padded for 1-based indexing.
+      num_elements : int
+          The total number of elements in the structure.
+      dof_per_node : int
+          The number of degrees of freedom per node.
+
+    Returns:
+      np.ndarray
+          A 1D array of computed bar stretches (element elongations), padded with a dummy value at index 0 to maintain 1-based indexing.
+
+    Notes:
+    - The local nodal displacements for each element are extracted from the global nodal displacements using the element connectivity information.
+    - The element stretch is computed as the dot product (summed over DOFs) between the BELE matrix and the local displacements.
+    """
+    # Initialize a local displacements matrix for each element.
+    # The shape is (num_elements+1, 2*dof_per_node+1) because each element has 2 nodes and we use 1-based indexing.
+    local_displacements = np.zeros((num_elements + 1, 2 * dof_per_node + 1))
+    # Set the dummy 0th row and 0th column to NaN to preserve 1-based indexing.
+    local_displacements[0, :] = local_displacements[:, 0] = np.nan
+
+    # Create an array of local DOF indices (from 1 to dof_per_node) for 1-based indexing.
+    local_dofs = np.arange(1, dof_per_node + 1)
+    
+    # Extract the local node numbers for each element (skip the dummy row at index 0).
+    # This results in an array of shape (num_elements, 2).
+    local_node_nums = elenodes[1:, [1, 2]].astype(int) # [1,2] for node 1 and 2
+    
+    # Using fancy indexing, extract the local displacements for each element from the global nodal displacements.
+    # Here, local_node_nums[:, :, None] reshapes the node numbers to shape (num_elements, 2, 1),
+    # and local_dofs[None, None, :] reshapes the DOF indices to shape (1, 1, dof_per_node),
+    # which broadcasts to (num_elements, 2, dof_per_node). The result is then reshaped to match 
+    # the (num_elements, 2*dof_per_node) portion of local_displacements (ignoring the dummy column).
+    local_displacements[1:, 1:] = nodal_disps[local_node_nums[:, :, None], local_dofs[None, None, :]].reshape(local_displacements[1:, 1:].shape)
+    
+    # Initialize an array to store the computed bar stretches (one value per element, with 1-based indexing).
+    bar_stretch = np.zeros(num_elements + 1)
+    # Compute the bar stretch for each element:
+    # For each element (from index 1 onward), take the element-wise product of its BELE row (excluding dummy column)
+    # and the corresponding local displacement row, and sum the products to perform a row-wise dot product.
+    bar_stretch[1:] = np.sum(bele[1:, 1:] * local_displacements[1:, 1:], axis=1)
+    
+    return bar_stretch
+
+def compute_element_forces(ele_stretches: np.ndarray, Youngs_modulus: np.ndarray, areas: np.ndarray, lengths: np.ndarray) -> np.ndarray:
+    """
+    Computes the axial (bar) force for each element based on its stretch (elongation) and material properties.
+
+    The axial force is calculated using the formula:
+        F = (E * A / L) * stretch
+    where:
+      - E is the Young's modulus (material stiffness),
+      - A is the cross-sectional area,
+      - L is the original length of the element,
+      - stretch is the change in length (ΔL) of the element.
+
+    Parameters:
+      ele_stretches : np.ndarray
+          A 1D array containing the stretch (elongation) values for each element.
+          This array is padded with a dummy value at index 0 for 1-based indexing.
+      Youngs_modulus : np.ndarray
+          A 1D array of Young's modulus values for each element, padded for 1-based indexing.
+      areas : np.ndarray
+          A 1D array of cross-sectional areas for each element, padded for 1-based indexing.
+      lengths : np.ndarray
+          A 1D array of original lengths for each element, padded for 1-based indexing.
+
+    Returns:
+      np.ndarray
+          A 1D array of computed axial forces for each element, padded with NaN at index 0 
+          to maintain 1-based indexing.
+    """
+    # Initialize an array for element forces with the same shape as ele_stretches,
+    ele_forces = np.full_like(ele_stretches, fill_value=np.nan)
+    # Compute the axial force for each element using the formula: F = (E * A / L) * stretch
+    # The computation is applied from index 1 onward to skip the dummy entry at index 0.
+    ele_forces[1:] = Youngs_modulus[1:] * areas[1:] / lengths[1:] * ele_stretches[1:]
+    # Return the computed element forces array, which is padded to maintain 1-based indexing.
+    return ele_forces
+
+def compute_external_forces(bar_force: np.ndarray, bele: np.ndarray, elenodes: np.ndarray, num_nodes: int, dof_per_node: int) -> np.ndarray:
+    """
+    Computes and accumulates the external force contributions from each element into a global external forces matrix.
+
+    Each element contributes forces to its connected nodes according to the element’s bar force and its BELE components.
+    The function accumulates these contributions into a global external forces array. The arrays use 1-based indexing, so the 0th row and column are reserved as dummy placeholders.
+
+    Parameters:
+      bar_force : np.ndarray
+          A 1D array of bar forces for each element (with a dummy entry at index 0 for 1-based indexing).
+      bele : np.ndarray
+          A 2D array representing the element transformation (BELE) matrices for each element,
+          padded for 1-based indexing (dummy row and column at index 0).
+      elenodes : np.ndarray
+          A 2D connectivity array for the elements, where each row corresponds to an element.
+          The columns contain node numbers; columns [1, 2] indicate the two nodes of each element,
+          and the array is padded with a dummy row at index 0 for 1-based indexing.
+      num_nodes : int
+          The total number of nodes (excluding the dummy node at index 0).
+      dof_per_node : int
+          The number of degrees of freedom per node.
+
+    Returns:
+      np.ndarray
+          A 2D global external forces matrix of shape (num_nodes+1, dof_per_node+1) with accumulated contributions.
+          The 0th row and 0th column contain NaN values to maintain 1-based indexing.
+    """
+    # Initialize the global external forces matrix with zeros. We add one extra row and column for 1-based indexing.
+    external_forces = np.zeros((num_nodes + 1, dof_per_node + 1))
+    # Set the 0th row and 0th column to NaN as they are dummy entries.
+    external_forces[0, :] = external_forces[:, 0] = np.nan
+
+    # Create an array of local DOF indices from 1 to dof_per_node (1-based indexing).
+    local_dofs = np.arange(1, dof_per_node + 1)
+
+    # Extract the global node numbers for each element's two nodes.
+    # We skip the dummy row at index 0 and take columns 1 and 2 (for node 1 and node 2).
+    global_node_nums = elenodes[1:, [1, 2]].astype(int)  # shape: (num_elements, 2)
+
+    # Compute each element's external force contribution.
+    # Multiply each element's bar force (skipping the dummy at index 0) with its BELE transformation factors.
+    # This produces an array of shape (num_elements, 2*dof_per_node).
+    local_ext_forces = bar_force[1:, np.newaxis] * bele[1:, 1:]
+    
+    # Reshape local_ext_forces to separate the contributions from the two nodes.
+    # New shape: (num_elements, 2, dof_per_node), where the 2nd dimension represents the two nodes.
+    # NOTE: essentially, we have 3 indices. The first is the element number, the second is the node number, and the third is the DOF number.
+    local_ext_forces = local_ext_forces.reshape(-1, 2, dof_per_node)
+    
+    # Reshape global_node_nums so that it has an extra axis for DOFs.
+    # New shape: (num_elements, 2, 1)
+    global_node_nums = global_node_nums[:, :, None]
+    
+    # Reshape local_dofs to match the dimensions for broadcasting.
+    # New shape: (1, 1, dof_per_node)
+    local_dofs = local_dofs[None, None, :]
+    
+    # Use np.add.at to accumulate the force contributions into the global external forces matrix.
+    # This safely handles the case when the same node appears in multiple elements.
+    # The indices (global_node_nums, local_dofs) are broadcast to the shape of local_ext_forces.
+    np.add.at(external_forces, (global_node_nums, local_dofs), local_ext_forces)
+
+    return external_forces
 
 def write_nodal_displacements_file(nodes:np.ndarray, nodal_disp: np.ndarray, num_nodes:int, dof_per_node: int) -> pd.DataFrame:
     # pull out x and y coordinates of each node to form full data table
@@ -650,70 +804,82 @@ def main():
     """
     Main function to execute the finite element analysis for a 3D truss system.
 
-    This function:
-    - Reads input files containing node coordinates, element connectivity, applied forces, and displacement boundary conditions.
-    - Computes degrees of freedom (DOFs) per node and initializes the global DOF structure.
-    - Assembles the global stiffness matrix and force vector using an element-by-element approach.
-    - Solves for the reduced nodal displacements.
+    This function performs the following steps:
+      1. Reads input files for nodes, elements, applied forces, and displacement boundary conditions.
+      2. Computes degrees of freedom (DOFs) per node and the total DOFs for the structure.
+      3. Constructs the global connectivity matrix mapping local node DOFs to global DOF numbers.
+      4. Reads element connectivity and computes element lengths and directional cosines.
+      5. Reads force and displacement boundary conditions, and determines the number of free DOFs.
+      6. Reorders the global connectivity matrix to handle prescribed displacements properly.
+      7. Initializes the global force vector using the external loads.
+      8. Assembles the global stiffness matrix using an element-by-element approach.
+      9. Solves the reduced system for the unknown nodal displacements.
+     10. Reconstructs the full nodal displacement matrix by incorporating the known (prescribed) displacements.
+     11. Computes element stretches (elongations) using the transformation matrix (BELE) and the nodal displacements.
+     12. Computes strains for each element.
+     13. Computes element axial forces using the strain and material properties.
+     14. Computes the global external forces by accumulating the element contributions.
+     15. Writes the output data (nodal displacements, external forces, and element properties) to DataFrames.
     """
 
-    # Define the directory containing the input files
-    directory_path = "/Users/kis/Desktop/COE321K/hw4/test_cases_3d/"
+    # Define the directory containing the input files.
+    directory_path = "/Users/kis/Desktop/COE321K/hw4/hw4_inputs/"
+    # Alternative directories can be set if needed.
     print(f"ACCESSING FOLDER: {directory_path}")
 
     # -------------------------------
     # STEP 1: READ NODE INFORMATION
     # -------------------------------
-    # Read the node file to obtain nodal coordinates, total number of nodes, and problem dimension (2D/3D)
+    # Read node data: coordinates, total nodes, and dimensions (2D/3D).
     nodes, num_nodes, num_dims = read_nodes_file(filepath=directory_path + 'nodes')
 
-    # Compute the degrees of freedom per node (for a truss, DOFs = spatial dimensions)
+    # For a truss, DOFs per node equal the spatial dimensions.
     dof_per_node = num_dims  
 
-    # Compute the total number of DOFs in the structure (excluding padding)
-    num_total_dofs = (len(nodes) - 1) * dof_per_node  # Using 1-based indexing
+    # Compute the total number of DOFs in the structure (1-based indexing).
+    num_total_dofs = (len(nodes) - 1) * dof_per_node
 
-    # Construct the global connectivity matrix, mapping local DOFs to global indices
+    # Build the global connectivity matrix mapping each node's local DOFs to global DOF numbers.
     global_connectivity = build_global_connectivity(nodes, dof_per_node)
 
     # -------------------------------
     # STEP 2: READ ELEMENT CONNECTIVITY
     # -------------------------------
-    # Read the element file, which defines how nodes are connected to form elements
+    # Read element data: connectivity, element nodes, and total number of elements.
     elements, elenodes, num_elements = read_elements_file(filepath=directory_path + 'elements')
 
-    # Compute element lengths and directional cosines (used for transformation matrices)
+    # Compute element lengths and directional cosines used in transformation matrices.
     Ls, cosines = compute_lengths_and_cosines(elements, nodes)
 
     # -------------------------------
     # STEP 3: READ FORCE AND DISPLACEMENT BOUNDARY CONDITIONS
     # -------------------------------
-    # Read the applied force boundary conditions (external loads)
+    # Read external force boundary conditions.
     force_BCs, num_force_BCs = read_forces_file(filepath=directory_path + 'forces')
 
-    # Read the prescribed displacement boundary conditions (fixed DOFs)
+    # Read prescribed displacement (fixed DOFs) boundary conditions.
     disp_BCs, num_disp_BCs = read_displacements_file(filepath=directory_path + 'displacements')
 
-    # Compute the number of active DOFs (free DOFs without prescribed displacements)
+    # Determine the number of active (free) DOFs by subtracting prescribed DOFs.
     num_active_dofs = num_total_dofs - num_disp_BCs
 
-    # Reorder the global connectivity matrix to ensure proper handling of prescribed displacements
+    # Reorder the global connectivity matrix so that free DOFs come first.
     global_connectivity = reorder_global_connectivity(disp_BCs, global_connectivity, num_total_dofs)
 
-    # Initialize the global force vector, incorporating external loads
+    # Initialize the global force vector using external loads and the global connectivity.
     forces = init_forces(force_BCs, global_connectivity, num_total_dofs)
 
     # -------------------------------
     # STEP 4: ASSEMBLE GLOBAL STIFFNESS MATRIX
     # -------------------------------
-    # Construct element transformation matrices (direction cosines for each bar element)
+    # Construct the BELE matrix (element transformation matrix) using the directional cosines.
     bar_elements = build_bele(cosines, num_elements, dof_per_node)
 
-    # Extract Young's modulus (E) and cross-sectional area (A) from element properties
-    Es = elements[:, -2]  # Young's modulus for each element
-    As = elements[:, -1]  # Cross-sectional area for each element
+    # Extract material properties: Young's modulus (E) and cross-sectional area (A) for each element.
+    Es = elements[:, -2]  # Column for Young's modulus.
+    As = elements[:, -1]  # Column for cross-sectional area.
 
-    # Assemble the global stiffness matrix and reduce it for active DOFs
+    # Assemble the global stiffness matrix and adjust the force vector for prescribed displacements.
     K_red, F_red = assemble_element_by_element(
         bar_elements, elenodes, global_connectivity, disp_BCs, forces, 
         Es, As, Ls, dof_per_node, num_active_dofs, num_disp_BCs, num_nodes
@@ -722,57 +888,50 @@ def main():
     # -------------------------------
     # STEP 5: SOLVE FOR NODAL DISPLACEMENTS
     # -------------------------------
-    # Solve for the UNKNOWN nodal displacements using the reduced system of equations.
-    # This function solves K_reduced * u_free/unknown = F_reduced for the free DOFs.
+    # Solve the reduced system: K_red * u_free = F_red for the unknown (free) nodal displacements.
     solved_U_red = solve_reduced_nodal_displacements(K_red, F_red)
 
-    # Reconstruct the full nodal displacement matrix by incorporating known (prescribed) displacements.
-    # This ensures that both free and fixed displacements are included in the final displacement array.
+    # Reconstruct the full nodal displacement matrix by combining solved displacements with prescribed ones.
     nodal_disps = create_known_displacements_matrix(disp_BCs, num_disp_BCs, num_nodes, dof_per_node)
 
-    # Pad the solution with a NaN value at the front to maintain 1-based indexing.
-    # This aligns the array structure with the 1-based convention used in input data.
+    # Pad the solved free displacement vector to maintain 1-based indexing.
     solved_U_red = np.pad(solved_U_red, ((1,0), (0,0)), 'constant', constant_values=np.nan).reshape((len(solved_U_red)+1,))
 
+    # Insert the solved free displacements into the full displacement matrix.
     nodal_disps = insert_solved_displacements(nodal_disps, solved_U_red, global_connectivity, num_active_dofs)
 
-    stretch = np.zeros(shape=(num_elements+1,))
-    bar_forces = np.full_like(stretch, fill_value=np.nan)
-    external_forces = np.zeros((num_nodes+1, dof_per_node+1))
+    # -------------------------------
+    # STEP 6: COMPUTE ELEMENT STRETCH, STRAIN, AND FORCE
+    # -------------------------------
+    # Compute the stretch (elongation) of each element using local nodal displacements and BELE.
+    bar_stretch = compute_element_stretches(nodal_disps, elenodes, bar_elements, num_elements, dof_per_node)
 
-    stretch[0] = np.nan
+    # Calculate strains for each element: strain = stretch / original_length.
+    strains = bar_stretch / Ls
 
-    for iele in range(1, num_elements+1): # Loop over each element
-        ulocal = np.zeros((2*dof_per_node+1,)) # Initialize local displacement vector
-        ulocal[0] = np.nan # Set the 0th index to NaN for 1-based indexing
-        for local_node in [1,2]: # Loop over the two nodes of the element
-            for local_dof in range(1, dof_per_node+1): # Loop over each local DOF for the current node
-                # Get the global node number for the current local node
-                ulocal[dof_per_node * (local_node - 1)+local_dof] = nodal_disps[int(elenodes[iele, local_node]), local_dof]
-        
-        for i in range(1, 2*dof_per_node+1): # Loop over each local DOF of the element
-            stretch[iele] += bar_elements[iele, i] * ulocal[i] # Compute the element stretch
-        
-        bar_forces[iele] = stretch[iele] * Es[iele] * As[iele] / Ls[iele] # Compute the bar force
-        
-        for local_node in [1, 2]: # Loop over the two nodes of the element
-            for local_dof in range(1, dof_per_node+1): # Loop over each local DOF for the current node
-                global_node = int(elenodes[iele, local_node]) # Get the global node number
-                # Update the external forces array with the computed forces
-                external_forces[global_node, local_dof] += bar_forces[iele] * bar_elements[iele, dof_per_node * (local_node - 1) + local_dof]
+    # Compute the axial (bar) forces in each element using: F = E * A / L * stretch.
+    bar_forces = compute_element_forces(bar_stretch, Es, As, Ls)
 
-    # Compute the strains in each element
-    strains = stretch / Ls
-    
-    #### print out final data outputs:
-    print("\n")
-    print("-" * 40)
+    # -------------------------------
+    # STEP 7: COMPUTE GLOBAL EXTERNAL FORCES
+    # -------------------------------
+    # Accumulate the force contributions from all elements into the global external forces array.
+    external_forces = compute_external_forces(bar_forces, bar_elements, elenodes, num_nodes, dof_per_node)
+
+    # -------------------------------
+    # STEP 8: OUTPUT RESULTS
+    # -------------------------------
+    # Write the computed nodal displacements to a DataFrame for display.
     nodal_displacements_df = write_nodal_displacements_file(nodes, nodal_disps, num_nodes, dof_per_node)
     print("<<< NODAL DISPLACEMENTS DATA TABLE >>>")
     print(nodal_displacements_df)
+
+    # Write the computed external forces to a DataFrame for display.
     external_forces_df = write_external_forces_file(nodes, external_forces, num_nodes, dof_per_node)
     print("\n<<< EXTERNAL FORCES DATA TABLE >>>")
     print(external_forces_df)
+
+    # Write the computed element strains and forces to a DataFrame for display.
     element_properties_df = write_bar_properties_file(strains, bar_forces, Ls, num_elements)
     print("\n<<< ELEMENT STRAINS AND FORCES DATA TABLE >>>")
     print(element_properties_df)
