@@ -797,7 +797,7 @@ def write_element_forces_file(element_forces_moments: np.ndarray, elenodes: np.n
 def main():
 
     # Define the directory containing the input files.
-    directory_path = "/Users/kis/Desktop/COE321K/hw5/inputs/"
+    directory_path = "/Users/kis/Desktop/COE321K/hw5/discussion_test_inputs/"
     # Alternative directories can be set if needed.
     print(f"ACCESSING FOLDER: {directory_path}")
 
@@ -884,6 +884,7 @@ def main():
     # -------------------------------
     # STEP 8: OUTPUT RESULTS
     # -------------------------------
+    
     ## DEBUGGING COMMENTS:
     """
     print(f"\nNum of Nodes: {num_nodes}, Num of Dims: {num_dims}") # DEBUG
